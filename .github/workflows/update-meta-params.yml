@@ -1,0 +1,142 @@
+name: Update Meta Parameters
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  update-meta:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: '16'
+
+      - name: Install dependencies
+        run: npm install -g @actions/core
+
+      - name: Update meta.json with parameters
+        run: |
+          # Create a temporary directory for processing
+          mkdir -p temp
+          
+          # Get version from GitHub release
+          VERSION=${GITHUB_REF#refs/tags/}
+          echo "Current version from release: $VERSION"
+          
+          # Function to extract parameters from uischema
+          extract_params() {
+            local file=$1
+            local operation_name=$(jq -r '.operationName' "$file")
+            local operation_title=$(jq -r '.title' "$file")
+            local params=$(jq -r '.elements[0].value.elements[1].value.elements[] | 
+              select(.type == "attribute") | 
+              {
+                name: .value.name,
+                type: .value.inputType,
+                required: .value.required,
+                description: .value.helpTip
+              }' "$file")
+            
+            echo "{\"operation\": \"$operation_name\", \"title\": \"$operation_title\", \"params\": $params}"
+          }
+          
+          # Process all uischema files
+          for file in src/main/resources/uischema/*.json; do
+            if [ -f "$file" ]; then
+              extract_params "$file" >> temp/params.json
+            fi
+          done
+          
+          # Read the current meta.json
+          META_JSON=$(cat .connector-store/meta.json)
+          
+          # Check if version exists in meta.json
+          VERSION_EXISTS=$(echo "$META_JSON" | jq -r --arg version "$VERSION" '.releases[] | select(.tagName == $version) | .tagName')
+          
+          if [ -n "$VERSION_EXISTS" ]; then
+            echo "Version $VERSION exists in meta.json, updating parameters..."
+            
+            # Get existing operations for this version
+            EXISTING_OPS=$(echo "$META_JSON" | jq -r --arg version "$VERSION" '.releases[] | select(.tagName == $version) | .operations[].name')
+            
+            # Update operations with parameters
+            for operation in $(echo "$EXISTING_OPS"); do
+              PARAMS=$(jq -r "select(.operation == \"$operation\") | .params" temp/params.json)
+              if [ "$PARAMS" != "null" ]; then
+                META_JSON=$(echo "$META_JSON" | jq --arg version "$VERSION" --arg op "$operation" --argjson params "$PARAMS" \
+                  '(.releases[] | select(.tagName == $version) | .operations[] | select(.name == $op)).params = $params')
+              fi
+            done
+            
+            # Check for new operations
+            for file in src/main/resources/uischema/*.json; do
+              if [ -f "$file" ]; then
+                OP_NAME=$(jq -r '.operationName' "$file")
+                if ! echo "$EXISTING_OPS" | grep -q "^$OP_NAME$"; then
+                  echo "Found new operation: $OP_NAME"
+                  OP_DATA=$(jq -r "select(.operation == \"$OP_NAME\")" temp/params.json)
+                  if [ "$OP_DATA" != "null" ]; then
+                    NEW_OP=$(echo "$OP_DATA" | jq '{
+                      name: .operation,
+                      description: .title,
+                      params: .params,
+                      isHidden: false
+                    }')
+                    META_JSON=$(echo "$META_JSON" | jq --arg version "$VERSION" --argjson new_op "$NEW_OP" \
+                      '(.releases[] | select(.tagName == $version) | .operations) += [$new_op]')
+                  fi
+                fi
+              fi
+            done
+          else
+            echo "Version $VERSION does not exist in meta.json, creating new release entry..."
+            
+            # Get the latest release as template
+            LATEST_RELEASE=$(echo "$META_JSON" | jq -r '.releases[0]')
+            
+            # Create new release entry with updated operations
+            NEW_RELEASE=$(echo "$LATEST_RELEASE" | jq --arg version "$VERSION" '.tagName = $version')
+            
+            # Create new operations array with all operations from uischema
+            NEW_OPS="[]"
+            for file in src/main/resources/uischema/*.json; do
+              if [ -f "$file" ]; then
+                OP_DATA=$(jq -r "select(.operation == \"$(jq -r '.operationName' "$file")\")" temp/params.json)
+                if [ "$OP_DATA" != "null" ]; then
+                  NEW_OP=$(echo "$OP_DATA" | jq '{
+                    name: .operation,
+                    description: .title,
+                    params: .params,
+                    isHidden: false
+                  }')
+                  NEW_OPS=$(echo "$NEW_OPS" | jq --argjson new_op "$NEW_OP" '. += [$new_op]')
+                fi
+              fi
+            done
+            
+            # Update the new release with all operations
+            NEW_RELEASE=$(echo "$NEW_RELEASE" | jq --argjson new_ops "$NEW_OPS" '.operations = $new_ops')
+            
+            # Add new release to meta.json
+            META_JSON=$(echo "$META_JSON" | jq --argjson new_release "$NEW_RELEASE" '.releases |= [$new_release] + .')
+          fi
+          
+          # Write back to meta.json
+          echo "$META_JSON" > .connector-store/meta.json
+          
+          # Cleanup
+          rm -rf temp
+
+      - name: Commit and push changes
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          git add .connector-store/meta.json
+          git commit -m "Update meta.json with operation parameters for version $VERSION"
+          git push
