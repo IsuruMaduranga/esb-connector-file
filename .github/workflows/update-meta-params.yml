@@ -12,311 +12,278 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Set up Node.js
-        uses: actions/setup-node@v3
+      - name: Set up Python
+        uses: actions/setup-python@v4
         with:
-          node-version: '16'
-
-      - name: Install dependencies
-        run: npm install -g @actions/core
+          python-version: '3.10'
 
       - name: Update meta.json with parameters
         run: |
-          # Create a temporary directory for processing
-          mkdir -p temp
-          
-          # Get version from GitHub release
-          VERSION=${GITHUB_REF#refs/tags/}
-          echo "Current version from release: $VERSION"
-          
-          # Process operation files
-          echo "Processing operation files..."
-          
-          # Function to extract parameters from operation uischema
-          extract_operation_params() {
-            local file=$1
-            # Skip if not an operation file
-            if ! jq -e '.operationName' "$file" > /dev/null 2>&1; then
-              return
-            fi
-            
-            local operation_name=$(jq -r '.operationName' "$file")
-            local operation_title=$(jq -r '.title' "$file")
-            
-            echo "Processing operation: $operation_name"
-            
-            # Extract parameters from nested structure
-            local params_array="[]"
-            # Extract from the first level attributes (if any)
-            local first_level=$(jq -r '.elements[0].value.elements[] | 
-              select(.type == "attribute") | 
-              {
-                name: .value.name,
-                type: .value.inputType,
-                required: .value.required,
-                description: .value.helpTip
-              }' "$file" 2>/dev/null)
-            
-            if [ -n "$first_level" ] && [ "$first_level" != "null" ]; then
-              params_array=$(echo "$params_array" | jq --argjson params "$first_level" '. += [$params]')
-            fi
-            
-            # Extract from the nested attribute groups
-            local nested_params=$(jq -r '.elements[0].value.elements[] | 
-              select(.type == "attributeGroup") | 
-              .value.elements[] | 
-              select(.type == "attribute") | 
-              {
-                name: .value.name,
-                type: .value.inputType,
-                required: .value.required,
-                description: .value.helpTip
-              }' "$file" 2>/dev/null)
-            
-            if [ -n "$nested_params" ] && [ "$nested_params" != "null" ]; then
-              params_array=$(echo "$params_array" | jq --argjson params "$nested_params" '. += [$params]')
-            fi
-            
-            echo "{\"operation\": \"$operation_name\", \"title\": \"$operation_title\", \"params\": $params_array}" >> temp/operation_params.json
-            echo "Added operation $operation_name to operation_params.json"
-          }
-          
-          # Function to extract parameters from connection uischema
-          extract_connection_params() {
-            local file=$1
-            # Skip if not a connection file
-            if ! jq -e '.connectionName' "$file" > /dev/null 2>&1; then
-              return
-            fi
-            
-            local connection_name=$(jq -r '.connectionName' "$file")
-            local connection_title=$(jq -r '.title' "$file")
-            
-            echo "Processing connection: $connection_name"
-            
-            # Extract parameters from nested structure
-            local params_array="[]"
-            
-            # Extract from the top level attributes
-            local top_level=$(jq -r '.elements[] | 
-              select(.type == "attribute") | 
-              {
-                name: .value.name,
-                type: .value.inputType,
-                required: .value.required,
-                description: .value.helpTip
-              }' "$file" 2>/dev/null)
-            
-            if [ -n "$top_level" ] && [ "$top_level" != "null" ]; then
-              params_array=$(echo "$params_array" | jq --argjson params "$top_level" '. += [$params]')
-            fi
-            
-            # Extract from the first level of attribute groups
-            local first_level=$(jq -r '.elements[] | 
-              select(.type == "attributeGroup") | 
-              .value.elements[] | 
-              select(.type == "attribute") | 
-              {
-                name: .value.name,
-                type: .value.inputType,
-                required: .value.required,
-                description: .value.helpTip
-              }' "$file" 2>/dev/null)
-            
-            if [ -n "$first_level" ] && [ "$first_level" != "null" ]; then
-              params_array=$(echo "$params_array" | jq --argjson params "$first_level" '. += [$params]')
-            fi
-            
-            # Extract from the second level of attribute groups
-            local second_level=$(jq -r '.elements[] | 
-              select(.type == "attributeGroup") | 
-              .value.elements[] | 
-              select(.type == "attributeGroup") | 
-              .value.elements[] | 
-              select(.type == "attribute") | 
-              {
-                name: .value.name,
-                type: .value.inputType,
-                required: .value.required,
-                description: .value.helpTip
-              }' "$file" 2>/dev/null)
-            
-            if [ -n "$second_level" ] && [ "$second_level" != "null" ]; then
-              params_array=$(echo "$params_array" | jq --argjson params "$second_level" '. += [$params]')
-            fi
-            
-            echo "{\"connection\": \"$connection_name\", \"title\": \"$connection_title\", \"params\": $params_array}" >> temp/connection_params.json
-            echo "Added connection $connection_name to connection_params.json"
-          }
-          
-          # Process all uischema files
-          for file in src/main/resources/uischema/*.json; do
-            if [ -f "$file" ]; then
-              extract_operation_params "$file"
-              extract_connection_params "$file"
-            fi
-          done
-          
-          # Read the current meta.json
-          META_JSON=$(cat .connector-store/meta.json)
-          
-          # Check if version exists in meta.json
-          VERSION_EXISTS=$(echo "$META_JSON" | jq -r --arg version "$VERSION" '.releases[] | select(.tagName == $version) | .tagName')
-          
-          if [ -n "$VERSION_EXISTS" ]; then
-            echo "Version $VERSION exists in meta.json, updating parameters..."
-            
-            # Update operations with parameters
-            if [ -f "temp/operation_params.json" ]; then
-              echo "Updating operations..."
-              # Get existing operations for this version
-              EXISTING_OPS=$(echo "$META_JSON" | jq -r --arg version "$VERSION" '.releases[] | select(.tagName == $version) | .operations[].name')
-              
-              # Update operations with parameters
-              for operation in $EXISTING_OPS; do
-                echo "Looking for parameters for operation: $operation"
-                PARAMS=$(jq -r "select(.operation == \"$operation\") | .params" temp/operation_params.json)
-                if [ "$PARAMS" != "" ] && [ "$PARAMS" != "null" ]; then
-                  echo "Found parameters for $operation: $PARAMS"
-                  META_JSON=$(echo "$META_JSON" | jq --arg version "$VERSION" --arg op "$operation" --argjson params "$PARAMS" \
-                    '(.releases[] | select(.tagName == $version) | .operations[] | select(.name == $op)).params = $params')
-                else
-                  echo "No parameters found for operation: $operation"
-                fi
-              done
-              
-              # Check for new operations
-              for file in src/main/resources/uischema/*.json; do
-                if [ -f "$file" ] && jq -e '.operationName' "$file" > /dev/null 2>&1; then
-                  OP_NAME=$(jq -r '.operationName' "$file")
-                  if ! echo "$EXISTING_OPS" | grep -q "^$OP_NAME$"; then
-                    echo "Found new operation: $OP_NAME"
-                    OP_DATA=$(jq -r "select(.operation == \"$OP_NAME\")" temp/operation_params.json)
-                    if [ "$OP_DATA" != "" ] && [ "$OP_DATA" != "null" ]; then
-                      NEW_OP=$(echo "$OP_DATA" | jq '{
-                        name: .operation,
-                        description: .title,
-                        params: .params,
-                        isHidden: false
-                      }')
-                      META_JSON=$(echo "$META_JSON" | jq --arg version "$VERSION" --argjson new_op "$NEW_OP" \
-                        '(.releases[] | select(.tagName == $version) | .operations) += [$new_op]')
-                    fi
-                  fi
-                fi
-              done
-            fi
-            
-            # Update connections with parameters
-            if [ -f "temp/connection_params.json" ]; then
-              echo "Updating connections..."
-              # Get existing connections for this version
-              EXISTING_CONNS=$(echo "$META_JSON" | jq -r --arg version "$VERSION" '.releases[] | select(.tagName == $version) | .connections[].name')
-              
-              # Update connections with parameters
-              for connection in $EXISTING_CONNS; do
-                echo "Looking for parameters for connection: $connection"
-                PARAMS=$(jq -r "select(.connection == \"$connection\") | .params" temp/connection_params.json)
-                if [ "$PARAMS" != "" ] && [ "$PARAMS" != "null" ]; then
-                  echo "Found parameters for $connection: $PARAMS"
-                  META_JSON=$(echo "$META_JSON" | jq --arg version "$VERSION" --arg conn "$connection" --argjson params "$PARAMS" \
-                    '(.releases[] | select(.tagName == $version) | .connections[] | select(.name == $conn)).params = $params')
-                else
-                  echo "No parameters found for connection: $connection"
-                fi
-              done
-              
-              # Check for new connections
-              for file in src/main/resources/uischema/*.json; do
-                if [ -f "$file" ] && jq -e '.connectionName' "$file" > /dev/null 2>&1; then
-                  CONN_NAME=$(jq -r '.connectionName' "$file")
-                  if ! echo "$EXISTING_CONNS" | grep -q "^$CONN_NAME$"; then
-                    echo "Found new connection: $CONN_NAME"
-                    CONN_DATA=$(jq -r "select(.connection == \"$CONN_NAME\")" temp/connection_params.json)
-                    if [ "$CONN_DATA" != "" ] && [ "$CONN_DATA" != "null" ]; then
-                      NEW_CONN=$(echo "$CONN_DATA" | jq '{
-                        name: .connection,
-                        description: .title,
-                        params: .params
-                      }')
-                      META_JSON=$(echo "$META_JSON" | jq --arg version "$VERSION" --argjson new_conn "$NEW_CONN" \
-                        '(.releases[] | select(.tagName == $version) | .connections) += [$new_conn]')
-                    fi
-                  fi
-                fi
-              done
-            fi
-            
-          else
-            echo "Version $VERSION does not exist in meta.json, creating new release entry..."
-            
-            # Get the latest release as template
-            LATEST_RELEASE=$(echo "$META_JSON" | jq -r '.releases[0]')
-            
-            # Create new release entry with updated operations and connections
-            NEW_RELEASE=$(echo "$LATEST_RELEASE" | jq --arg version "$VERSION" '.tagName = $version')
-            
-            # Create new operations array with all operations from uischema
-            if [ -f "temp/operation_params.json" ]; then
-              echo "Creating operations for new release..."
-              NEW_OPS="[]"
-              for file in src/main/resources/uischema/*.json; do
-                if [ -f "$file" ] && jq -e '.operationName' "$file" > /dev/null 2>&1; then
-                  OP_NAME=$(jq -r '.operationName' "$file")
-                  OP_DATA=$(jq -r "select(.operation == \"$OP_NAME\")" temp/operation_params.json)
-                  if [ "$OP_DATA" != "" ] && [ "$OP_DATA" != "null" ]; then
-                    NEW_OP=$(echo "$OP_DATA" | jq '{
-                      name: .operation,
-                      description: .title,
-                      params: .params,
-                      isHidden: false
-                    }')
-                    NEW_OPS=$(echo "$NEW_OPS" | jq --argjson new_op "$NEW_OP" '. += [$new_op]')
-                  fi
-                fi
-              done
-              
-              # Update the new release with all operations
-              NEW_RELEASE=$(echo "$NEW_RELEASE" | jq --argjson new_ops "$NEW_OPS" '.operations = $new_ops')
-            fi
-            
-            # Create new connections array with all connections from uischema
-            if [ -f "temp/connection_params.json" ]; then
-              echo "Creating connections for new release..."
-              NEW_CONNS="[]"
-              for file in src/main/resources/uischema/*.json; do
-                if [ -f "$file" ] && jq -e '.connectionName' "$file" > /dev/null 2>&1; then
-                  CONN_NAME=$(jq -r '.connectionName' "$file")
-                  CONN_DATA=$(jq -r "select(.connection == \"$CONN_NAME\")" temp/connection_params.json)
-                  if [ "$CONN_DATA" != "" ] && [ "$CONN_DATA" != "null" ]; then
-                    NEW_CONN=$(echo "$CONN_DATA" | jq '{
-                      name: .connection,
-                      description: .title,
-                      params: .params
-                    }')
-                    NEW_CONNS=$(echo "$NEW_CONNS" | jq --argjson new_conn "$NEW_CONN" '. += [$new_conn]')
-                  fi
-                fi
-              done
-              
-              # Update the new release with all connections
-              NEW_RELEASE=$(echo "$NEW_RELEASE" | jq --argjson new_conns "$NEW_CONNS" '.connections = $new_conns')
-            fi
-            
-            # Add new release to meta.json
-            META_JSON=$(echo "$META_JSON" | jq --argjson new_release "$NEW_RELEASE" '.releases |= [$new_release] + .')
-          fi
-          
-          # Write back to meta.json
-          echo "$META_JSON" > .connector-store/meta.json
-          
-          # Cleanup
-          rm -rf temp
+          python3 - <<'EOF'
+          import json
+          import os
+          import glob
+          import sys
+
+          def extract_operation_params(file_path):
+              """Extract parameters from operation files"""
+              try:
+                  with open(file_path, 'r') as f:
+                      data = json.load(f)
+                  
+                  # Skip if not an operation file
+                  if 'operationName' not in data:
+                      return None
+                  
+                  operation_name = data.get('operationName')
+                  operation_title = data.get('title', '')
+                  
+                  print(f"Processing operation: {operation_name}")
+                  
+                  params = []
+                  
+                  # Check if the necessary structure exists
+                  if 'elements' in data and len(data['elements']) > 0:
+                      # Get the first element's value elements
+                      if 'value' in data['elements'][0] and 'elements' in data['elements'][0]['value']:
+                          elements = data['elements'][0]['value']['elements']
+                          
+                          # Extract top-level attributes
+                          for element in elements:
+                              if element.get('type') == 'attribute' and 'value' in element:
+                                  value = element['value']
+                                  params.append({
+                                      'name': value.get('name', ''),
+                                      'type': value.get('inputType', ''),
+                                      'required': value.get('required', ''),
+                                      'description': value.get('helpTip', '')
+                                  })
+                              
+                              # Extract nested attributes in attributeGroups
+                              elif element.get('type') == 'attributeGroup' and 'value' in element and 'elements' in element['value']:
+                                  nested_elements = element['value']['elements']
+                                  for nested in nested_elements:
+                                      if nested.get('type') == 'attribute' and 'value' in nested:
+                                          value = nested['value']
+                                          params.append({
+                                              'name': value.get('name', ''),
+                                              'type': value.get('inputType', ''),
+                                              'required': value.get('required', ''),
+                                              'description': value.get('helpTip', '')
+                                          })
+                  
+                  print(f"Found {len(params)} parameters for operation {operation_name}")
+                  return {
+                      'operation': operation_name,
+                      'title': operation_title,
+                      'params': params
+                  }
+              except Exception as e:
+                  print(f"Error processing operation file {file_path}: {e}")
+                  return None
+
+          def extract_connection_params(file_path):
+              """Extract parameters from connection files"""
+              try:
+                  with open(file_path, 'r') as f:
+                      data = json.load(f)
+                  
+                  # Skip if not a connection file
+                  if 'connectionName' not in data:
+                      return None
+                  
+                  connection_name = data.get('connectionName')
+                  connection_title = data.get('title', '')
+                  
+                  print(f"Processing connection: {connection_name}")
+                  
+                  params = []
+                  
+                  # Check if elements exist
+                  if 'elements' in data:
+                      elements = data['elements']
+                      
+                      # Process top-level attributes
+                      for element in elements:
+                          if element.get('type') == 'attribute' and 'value' in element:
+                              value = element['value']
+                              params.append({
+                                  'name': value.get('name', ''),
+                                  'type': value.get('inputType', ''),
+                                  'required': value.get('required', ''),
+                                  'description': value.get('helpTip', '')
+                              })
+                          
+                          # Process first level attribute groups
+                          elif element.get('type') == 'attributeGroup' and 'value' in element and 'elements' in element['value']:
+                              group_elements = element['value']['elements']
+                              
+                              for group_element in group_elements:
+                                  # Direct attributes in the group
+                                  if group_element.get('type') == 'attribute' and 'value' in group_element:
+                                      value = group_element['value']
+                                      params.append({
+                                          'name': value.get('name', ''),
+                                          'type': value.get('inputType', ''),
+                                          'required': value.get('required', ''),
+                                          'description': value.get('helpTip', '')
+                                      })
+                                  
+                                  # Nested attribute groups
+                                  elif group_element.get('type') == 'attributeGroup' and 'value' in group_element and 'elements' in group_element['value']:
+                                      nested_elements = group_element['value']['elements']
+                                      
+                                      for nested in nested_elements:
+                                          if nested.get('type') == 'attribute' and 'value' in nested:
+                                              value = nested['value']
+                                              params.append({
+                                                  'name': value.get('name', ''),
+                                                  'type': value.get('inputType', ''),
+                                                  'required': value.get('required', ''),
+                                                  'description': value.get('helpTip', '')
+                                              })
+                  
+                  print(f"Found {len(params)} parameters for connection {connection_name}")
+                  return {
+                      'connection': connection_name,
+                      'title': connection_title,
+                      'params': params
+                  }
+              except Exception as e:
+                  print(f"Error processing connection file {file_path}: {e}")
+                  return None
+
+          def update_meta_json():
+              """Main function to update meta.json with parameters"""
+              try:
+                  # Get version from GitHub release
+                  version = os.environ.get('GITHUB_REF', '').replace('refs/tags/', '')
+                  print(f"Current version from release: {version}")
+                  
+                  # Process all uischema files
+                  uischema_files = glob.glob('src/main/resources/uischema/*.json')
+                  operation_params = []
+                  connection_params = []
+                  
+                  for file_path in uischema_files:
+                      print(f"Processing file: {file_path}")
+                      op_data = extract_operation_params(file_path)
+                      conn_data = extract_connection_params(file_path)
+                      
+                      if op_data:
+                          operation_params.append(op_data)
+                      if conn_data:
+                          connection_params.append(conn_data)
+                  
+                  print(f"Found {len(operation_params)} operations and {len(connection_params)} connections")
+                  
+                  # Read meta.json
+                  with open('.connector-store/meta.json', 'r') as f:
+                      meta_json = json.load(f)
+                  
+                  # Check if version exists in meta.json
+                  version_exists = False
+                  version_index = -1
+                  
+                  for i, release in enumerate(meta_json.get('releases', [])):
+                      if release.get('tagName') == version:
+                          version_exists = True
+                          version_index = i
+                          break
+                  
+                  if version_exists:
+                      print(f"Version {version} exists in meta.json, updating parameters...")
+                      
+                      # Update operations with parameters
+                      if operation_params:
+                          print("Updating operations...")
+                          existing_ops = {op['name']: op for op in meta_json['releases'][version_index]['operations']}
+                          
+                          # Update existing operations
+                          for op_data in operation_params:
+                              op_name = op_data['operation']
+                              if op_name in existing_ops:
+                                  print(f"Updating parameters for operation: {op_name}")
+                                  existing_ops[op_name]['params'] = op_data['params']
+                              else:
+                                  print(f"Adding new operation: {op_name}")
+                                  meta_json['releases'][version_index]['operations'].append({
+                                      'name': op_name,
+                                      'description': op_data['title'],
+                                      'params': op_data['params'],
+                                      'isHidden': False
+                                  })
+                      
+                      # Update connections with parameters
+                      if connection_params:
+                          print("Updating connections...")
+                          existing_conns = {conn['name']: conn for conn in meta_json['releases'][version_index]['connections']}
+                          
+                          # Update existing connections
+                          for conn_data in connection_params:
+                              conn_name = conn_data['connection']
+                              if conn_name in existing_conns:
+                                  print(f"Updating parameters for connection: {conn_name}")
+                                  existing_conns[conn_name]['params'] = conn_data['params']
+                              else:
+                                  print(f"Adding new connection: {conn_name}")
+                                  meta_json['releases'][version_index]['connections'].append({
+                                      'name': conn_name,
+                                      'description': conn_data['title'],
+                                      'params': conn_data['params']
+                                  })
+                  else:
+                      print(f"Version {version} does not exist in meta.json, creating new release entry...")
+                      
+                      # Get the latest release as template
+                      if meta_json.get('releases'):
+                          latest_release = meta_json['releases'][0].copy()
+                          
+                          # Update the version
+                          latest_release['tagName'] = version
+                          
+                          # Create operations array
+                          if operation_params:
+                              latest_release['operations'] = []
+                              for op_data in operation_params:
+                                  latest_release['operations'].append({
+                                      'name': op_data['operation'],
+                                      'description': op_data['title'],
+                                      'params': op_data['params'],
+                                      'isHidden': False
+                                  })
+                          
+                          # Create connections array
+                          if connection_params:
+                              latest_release['connections'] = []
+                              for conn_data in connection_params:
+                                  latest_release['connections'].append({
+                                      'name': conn_data['connection'],
+                                      'description': conn_data['title'],
+                                      'params': conn_data['params']
+                                  })
+                          
+                          # Add new release to meta.json
+                          meta_json['releases'].insert(0, latest_release)
+                  
+                  # Write back to meta.json
+                  with open('.connector-store/meta.json', 'w') as f:
+                      json.dump(meta_json, f, indent=4)
+                  
+                  print("Successfully updated meta.json")
+                  return 0
+              except Exception as e:
+                  print(f"Error updating meta.json: {e}")
+                  return 1
+
+          # Execute the main function
+          sys.exit(update_meta_json())
+          EOF
 
       - name: Commit and push changes
         run: |
           git config --local user.email "action@github.com"
           git config --local user.name "GitHub Action"
           git add .connector-store/meta.json
-          git commit -m "Update meta.json with operation and connection parameters for version $VERSION"
+          git commit -m "Update meta.json with operation and connection parameters for version ${{ github.ref_name }}"
           git push
