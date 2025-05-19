@@ -29,14 +29,106 @@ jobs:
           VERSION=${GITHUB_REF#refs/tags/}
           echo "Current version from release: $VERSION"
           
-          # Function to extract parameters from uischema
-          extract_params() {
+          # Process operation files
+          echo "Processing operation files..."
+          
+          # Function to extract parameters from operation uischema
+          extract_operation_params() {
             local file=$1
+            # Skip if not an operation file
+            if ! jq -e '.operationName' "$file" > /dev/null 2>&1; then
+              return
+            fi
+            
             local operation_name=$(jq -r '.operationName' "$file")
             local operation_title=$(jq -r '.title' "$file")
             
-            # Extract all attributes from all attribute groups
-            local params=$(jq -r '.elements[] | 
+            echo "Processing operation: $operation_name"
+            
+            # Extract parameters from nested structure
+            local params_array="[]"
+            # Extract from the first level attributes (if any)
+            local first_level=$(jq -r '.elements[0].value.elements[] | 
+              select(.type == "attribute") | 
+              {
+                name: .value.name,
+                type: .value.inputType,
+                required: .value.required,
+                description: .value.helpTip
+              }' "$file" 2>/dev/null)
+            
+            if [ -n "$first_level" ] && [ "$first_level" != "null" ]; then
+              params_array=$(echo "$params_array" | jq --argjson params "$first_level" '. += [$params]')
+            fi
+            
+            # Extract from the nested attribute groups
+            local nested_params=$(jq -r '.elements[0].value.elements[] | 
+              select(.type == "attributeGroup") | 
+              .value.elements[] | 
+              select(.type == "attribute") | 
+              {
+                name: .value.name,
+                type: .value.inputType,
+                required: .value.required,
+                description: .value.helpTip
+              }' "$file" 2>/dev/null)
+            
+            if [ -n "$nested_params" ] && [ "$nested_params" != "null" ]; then
+              params_array=$(echo "$params_array" | jq --argjson params "$nested_params" '. += [$params]')
+            fi
+            
+            echo "{\"operation\": \"$operation_name\", \"title\": \"$operation_title\", \"params\": $params_array}" >> temp/operation_params.json
+            echo "Added operation $operation_name to operation_params.json"
+          }
+          
+          # Function to extract parameters from connection uischema
+          extract_connection_params() {
+            local file=$1
+            # Skip if not a connection file
+            if ! jq -e '.connectionName' "$file" > /dev/null 2>&1; then
+              return
+            fi
+            
+            local connection_name=$(jq -r '.connectionName' "$file")
+            local connection_title=$(jq -r '.title' "$file")
+            
+            echo "Processing connection: $connection_name"
+            
+            # Extract parameters from nested structure
+            local params_array="[]"
+            
+            # Extract from the top level attributes
+            local top_level=$(jq -r '.elements[] | 
+              select(.type == "attribute") | 
+              {
+                name: .value.name,
+                type: .value.inputType,
+                required: .value.required,
+                description: .value.helpTip
+              }' "$file" 2>/dev/null)
+            
+            if [ -n "$top_level" ] && [ "$top_level" != "null" ]; then
+              params_array=$(echo "$params_array" | jq --argjson params "$top_level" '. += [$params]')
+            fi
+            
+            # Extract from the first level of attribute groups
+            local first_level=$(jq -r '.elements[] | 
+              select(.type == "attributeGroup") | 
+              .value.elements[] | 
+              select(.type == "attribute") | 
+              {
+                name: .value.name,
+                type: .value.inputType,
+                required: .value.required,
+                description: .value.helpTip
+              }' "$file" 2>/dev/null)
+            
+            if [ -n "$first_level" ] && [ "$first_level" != "null" ]; then
+              params_array=$(echo "$params_array" | jq --argjson params "$first_level" '. += [$params]')
+            fi
+            
+            # Extract from the second level of attribute groups
+            local second_level=$(jq -r '.elements[] | 
               select(.type == "attributeGroup") | 
               .value.elements[] | 
               select(.type == "attributeGroup") | 
@@ -47,15 +139,21 @@ jobs:
                 type: .value.inputType,
                 required: .value.required,
                 description: .value.helpTip
-              }' "$file")
+              }' "$file" 2>/dev/null)
             
-            echo "{\"operation\": \"$operation_name\", \"title\": \"$operation_title\", \"params\": $params}"
+            if [ -n "$second_level" ] && [ "$second_level" != "null" ]; then
+              params_array=$(echo "$params_array" | jq --argjson params "$second_level" '. += [$params]')
+            fi
+            
+            echo "{\"connection\": \"$connection_name\", \"title\": \"$connection_title\", \"params\": $params_array}" >> temp/connection_params.json
+            echo "Added connection $connection_name to connection_params.json"
           }
           
           # Process all uischema files
           for file in src/main/resources/uischema/*.json; do
             if [ -f "$file" ]; then
-              extract_params "$file" >> temp/params.json
+              extract_operation_params "$file"
+              extract_connection_params "$file"
             fi
           done
           
@@ -68,66 +166,142 @@ jobs:
           if [ -n "$VERSION_EXISTS" ]; then
             echo "Version $VERSION exists in meta.json, updating parameters..."
             
-            # Get existing operations for this version
-            EXISTING_OPS=$(echo "$META_JSON" | jq -r --arg version "$VERSION" '.releases[] | select(.tagName == $version) | .operations[].name')
-            
             # Update operations with parameters
-            for operation in $(echo "$EXISTING_OPS"); do
-              PARAMS=$(jq -r "select(.operation == \"$operation\") | .params" temp/params.json)
-              if [ "$PARAMS" != "null" ]; then
-                META_JSON=$(echo "$META_JSON" | jq --arg version "$VERSION" --arg op "$operation" --argjson params "$PARAMS" \
-                  '(.releases[] | select(.tagName == $version) | .operations[] | select(.name == $op)).params = $params')
-              fi
-            done
-            
-            # Check for new operations
-            for file in src/main/resources/uischema/*.json; do
-              if [ -f "$file" ]; then
-                OP_NAME=$(jq -r '.operationName' "$file")
-                if ! echo "$EXISTING_OPS" | grep -q "^$OP_NAME$"; then
-                  echo "Found new operation: $OP_NAME"
-                  OP_DATA=$(jq -r "select(.operation == \"$OP_NAME\")" temp/params.json)
-                  if [ "$OP_DATA" != "null" ]; then
-                    NEW_OP=$(echo "$OP_DATA" | jq '{
-                      name: .operation,
-                      description: .title,
-                      params: .params,
-                      isHidden: false
-                    }')
-                    META_JSON=$(echo "$META_JSON" | jq --arg version "$VERSION" --argjson new_op "$NEW_OP" \
-                      '(.releases[] | select(.tagName == $version) | .operations) += [$new_op]')
+            if [ -f "temp/operation_params.json" ]; then
+              echo "Updating operations..."
+              # Get existing operations for this version
+              EXISTING_OPS=$(echo "$META_JSON" | jq -r --arg version "$VERSION" '.releases[] | select(.tagName == $version) | .operations[].name')
+              
+              # Update operations with parameters
+              for operation in $EXISTING_OPS; do
+                echo "Looking for parameters for operation: $operation"
+                PARAMS=$(jq -r "select(.operation == \"$operation\") | .params" temp/operation_params.json)
+                if [ "$PARAMS" != "" ] && [ "$PARAMS" != "null" ]; then
+                  echo "Found parameters for $operation: $PARAMS"
+                  META_JSON=$(echo "$META_JSON" | jq --arg version "$VERSION" --arg op "$operation" --argjson params "$PARAMS" \
+                    '(.releases[] | select(.tagName == $version) | .operations[] | select(.name == $op)).params = $params')
+                else
+                  echo "No parameters found for operation: $operation"
+                fi
+              done
+              
+              # Check for new operations
+              for file in src/main/resources/uischema/*.json; do
+                if [ -f "$file" ] && jq -e '.operationName' "$file" > /dev/null 2>&1; then
+                  OP_NAME=$(jq -r '.operationName' "$file")
+                  if ! echo "$EXISTING_OPS" | grep -q "^$OP_NAME$"; then
+                    echo "Found new operation: $OP_NAME"
+                    OP_DATA=$(jq -r "select(.operation == \"$OP_NAME\")" temp/operation_params.json)
+                    if [ "$OP_DATA" != "" ] && [ "$OP_DATA" != "null" ]; then
+                      NEW_OP=$(echo "$OP_DATA" | jq '{
+                        name: .operation,
+                        description: .title,
+                        params: .params,
+                        isHidden: false
+                      }')
+                      META_JSON=$(echo "$META_JSON" | jq --arg version "$VERSION" --argjson new_op "$NEW_OP" \
+                        '(.releases[] | select(.tagName == $version) | .operations) += [$new_op]')
+                    fi
                   fi
                 fi
-              fi
-            done
+              done
+            fi
+            
+            # Update connections with parameters
+            if [ -f "temp/connection_params.json" ]; then
+              echo "Updating connections..."
+              # Get existing connections for this version
+              EXISTING_CONNS=$(echo "$META_JSON" | jq -r --arg version "$VERSION" '.releases[] | select(.tagName == $version) | .connections[].name')
+              
+              # Update connections with parameters
+              for connection in $EXISTING_CONNS; do
+                echo "Looking for parameters for connection: $connection"
+                PARAMS=$(jq -r "select(.connection == \"$connection\") | .params" temp/connection_params.json)
+                if [ "$PARAMS" != "" ] && [ "$PARAMS" != "null" ]; then
+                  echo "Found parameters for $connection: $PARAMS"
+                  META_JSON=$(echo "$META_JSON" | jq --arg version "$VERSION" --arg conn "$connection" --argjson params "$PARAMS" \
+                    '(.releases[] | select(.tagName == $version) | .connections[] | select(.name == $conn)).params = $params')
+                else
+                  echo "No parameters found for connection: $connection"
+                fi
+              done
+              
+              # Check for new connections
+              for file in src/main/resources/uischema/*.json; do
+                if [ -f "$file" ] && jq -e '.connectionName' "$file" > /dev/null 2>&1; then
+                  CONN_NAME=$(jq -r '.connectionName' "$file")
+                  if ! echo "$EXISTING_CONNS" | grep -q "^$CONN_NAME$"; then
+                    echo "Found new connection: $CONN_NAME"
+                    CONN_DATA=$(jq -r "select(.connection == \"$CONN_NAME\")" temp/connection_params.json)
+                    if [ "$CONN_DATA" != "" ] && [ "$CONN_DATA" != "null" ]; then
+                      NEW_CONN=$(echo "$CONN_DATA" | jq '{
+                        name: .connection,
+                        description: .title,
+                        params: .params
+                      }')
+                      META_JSON=$(echo "$META_JSON" | jq --arg version "$VERSION" --argjson new_conn "$NEW_CONN" \
+                        '(.releases[] | select(.tagName == $version) | .connections) += [$new_conn]')
+                    fi
+                  fi
+                fi
+              done
+            fi
+            
           else
             echo "Version $VERSION does not exist in meta.json, creating new release entry..."
             
             # Get the latest release as template
             LATEST_RELEASE=$(echo "$META_JSON" | jq -r '.releases[0]')
             
-            # Create new release entry with updated operations
+            # Create new release entry with updated operations and connections
             NEW_RELEASE=$(echo "$LATEST_RELEASE" | jq --arg version "$VERSION" '.tagName = $version')
             
             # Create new operations array with all operations from uischema
-            NEW_OPS="[]"
-            for file in src/main/resources/uischema/*.json; do
-              if [ -f "$file" ]; then
-                OP_DATA=$(jq -r "select(.operation == \"$(jq -r '.operationName' "$file")\")" temp/params.json)
-                if [ "$OP_DATA" != "null" ]; then
-                  NEW_OP=$(echo "$OP_DATA" | jq '{
-                    name: .operation,
-                    description: .title,
-                    params: .params,
-                    isHidden: false
-                  }')
-                  NEW_OPS=$(echo "$NEW_OPS" | jq --argjson new_op "$NEW_OP" '. += [$new_op]')
+            if [ -f "temp/operation_params.json" ]; then
+              echo "Creating operations for new release..."
+              NEW_OPS="[]"
+              for file in src/main/resources/uischema/*.json; do
+                if [ -f "$file" ] && jq -e '.operationName' "$file" > /dev/null 2>&1; then
+                  OP_NAME=$(jq -r '.operationName' "$file")
+                  OP_DATA=$(jq -r "select(.operation == \"$OP_NAME\")" temp/operation_params.json)
+                  if [ "$OP_DATA" != "" ] && [ "$OP_DATA" != "null" ]; then
+                    NEW_OP=$(echo "$OP_DATA" | jq '{
+                      name: .operation,
+                      description: .title,
+                      params: .params,
+                      isHidden: false
+                    }')
+                    NEW_OPS=$(echo "$NEW_OPS" | jq --argjson new_op "$NEW_OP" '. += [$new_op]')
+                  fi
                 fi
-              fi
-            done
+              done
+              
+              # Update the new release with all operations
+              NEW_RELEASE=$(echo "$NEW_RELEASE" | jq --argjson new_ops "$NEW_OPS" '.operations = $new_ops')
+            fi
             
-            # Update the new release with all operations
-            NEW_RELEASE=$(echo "$NEW_RELEASE" | jq --argjson new_ops "$NEW_OPS" '.operations = $new_ops')
+            # Create new connections array with all connections from uischema
+            if [ -f "temp/connection_params.json" ]; then
+              echo "Creating connections for new release..."
+              NEW_CONNS="[]"
+              for file in src/main/resources/uischema/*.json; do
+                if [ -f "$file" ] && jq -e '.connectionName' "$file" > /dev/null 2>&1; then
+                  CONN_NAME=$(jq -r '.connectionName' "$file")
+                  CONN_DATA=$(jq -r "select(.connection == \"$CONN_NAME\")" temp/connection_params.json)
+                  if [ "$CONN_DATA" != "" ] && [ "$CONN_DATA" != "null" ]; then
+                    NEW_CONN=$(echo "$CONN_DATA" | jq '{
+                      name: .connection,
+                      description: .title,
+                      params: .params
+                    }')
+                    NEW_CONNS=$(echo "$NEW_CONNS" | jq --argjson new_conn "$NEW_CONN" '. += [$new_conn]')
+                  fi
+                fi
+              done
+              
+              # Update the new release with all connections
+              NEW_RELEASE=$(echo "$NEW_RELEASE" | jq --argjson new_conns "$NEW_CONNS" '.connections = $new_conns')
+            fi
             
             # Add new release to meta.json
             META_JSON=$(echo "$META_JSON" | jq --argjson new_release "$NEW_RELEASE" '.releases |= [$new_release] + .')
@@ -144,5 +318,5 @@ jobs:
           git config --local user.email "action@github.com"
           git config --local user.name "GitHub Action"
           git add .connector-store/meta.json
-          git commit -m "Update meta.json with operation parameters for version $VERSION"
+          git commit -m "Update meta.json with operation and connection parameters for version $VERSION"
           git push
