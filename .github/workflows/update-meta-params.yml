@@ -11,7 +11,6 @@ jobs:
       - uses: actions/checkout@v3
         with:
           fetch-depth: 0
-          ref: ${{ github.event.release.target_commitish }}
 
       - name: Set up Python
         uses: actions/setup-python@v4
@@ -283,13 +282,17 @@ jobs:
 
       - name: Commit and push changes
         run: |
-          # Get the current branch name
-          BRANCH_NAME=${GITHUB_REF#refs/*/}
-          echo "Current branch: $BRANCH_NAME"
+          # Get the current branch name (should be the default branch)
+          CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD)
+          echo "Current branch: $CURRENT_BRANCH"
           
-          # Configure git
-          git config --local user.email "action@github.com"
-          git config --local user.name "GitHub Action"
+          # Get the current tag
+          TAG_NAME=${{ github.ref_name }}
+          echo "Current tag: $TAG_NAME"
+          
+          # Configure git with token-based authentication for push
+          git config --global user.name ${{ secrets.WSO2_INTEGRATION_BOT_USERNAME }}
+          git config --global user.email ${{ secrets.WSO2_INTEGRATION_BOT_EMAIL }}
           
           # Check if there are changes to commit
           if git diff --quiet .connector-store/meta.json; then
@@ -297,7 +300,9 @@ jobs:
             exit 0
           fi
           
-          # Add, commit, and push changes
+          # Add and commit changes
           git add .connector-store/meta.json
-          git commit -m "Update meta.json with operation and connection parameters for version ${{ github.ref_name }}"
-          git push origin HEAD:${GITHUB_REF_NAME}
+          git commit -m "Update meta.json with operation and connection parameters for version $TAG_NAME"
+          
+          # Push directly to the current branch
+          git push https://${{ github.actor }}:${{ secrets.WSO2_INTEGRATION_BOT_TOKEN }}@github.com/${{ github.repository }}.git HEAD:$CURRENT_BRANCH
