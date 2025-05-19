@@ -11,6 +11,7 @@ jobs:
       - uses: actions/checkout@v3
         with:
           fetch-depth: 0
+          ref: ${{ github.event.release.target_commitish }}
 
       - name: Set up Python
         uses: actions/setup-python@v4
@@ -282,8 +283,21 @@ jobs:
 
       - name: Commit and push changes
         run: |
+          # Get the current branch name
+          BRANCH_NAME=${GITHUB_REF#refs/*/}
+          echo "Current branch: $BRANCH_NAME"
+          
+          # Configure git
           git config --local user.email "action@github.com"
           git config --local user.name "GitHub Action"
+          
+          # Check if there are changes to commit
+          if git diff --quiet .connector-store/meta.json; then
+            echo "No changes to commit"
+            exit 0
+          fi
+          
+          # Add, commit, and push changes
           git add .connector-store/meta.json
           git commit -m "Update meta.json with operation and connection parameters for version ${{ github.ref_name }}"
-          git push
+          git push origin HEAD:${GITHUB_REF_NAME}
