@@ -34,7 +34,13 @@ jobs:
             local file=$1
             local operation_name=$(jq -r '.operationName' "$file")
             local operation_title=$(jq -r '.title' "$file")
-            local params=$(jq -r '.elements[0].value.elements[1].value.elements[] | 
+            
+            # Extract all attributes from all attribute groups
+            local params=$(jq -r '.elements[] | 
+              select(.type == "attributeGroup") | 
+              .value.elements[] | 
+              select(.type == "attributeGroup") | 
+              .value.elements[] | 
               select(.type == "attribute") | 
               {
                 name: .value.name,
