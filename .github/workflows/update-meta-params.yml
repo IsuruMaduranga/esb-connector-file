@@ -17,6 +17,14 @@ jobs:
         with:
           python-version: '3.10'
 
+      - name: Get default branch
+        id: get-default-branch
+        run: |
+            DEFAULT_BRANCH=$(gh repo view --json defaultBranchRef -q ".defaultBranchRef.name")
+            echo "default_branch=$DEFAULT_BRANCH" >> "$GITHUB_OUTPUT"
+        env:
+            GH_TOKEN: ${{ secrets.WSO2_INTEGRATION_BOT_TOKEN }}
+
       - name: Update meta.json with parameters
         run: |
           python3 - <<'EOF'
@@ -305,4 +313,4 @@ jobs:
           git commit -m "Update meta.json with operation and connection parameters for version $TAG_NAME"
           
           # Push directly to the current branch
-          git push https://${{ github.actor }}:${{ secrets.WSO2_INTEGRATION_BOT_TOKEN }}@github.com/${{ github.repository }}.git HEAD:$CURRENT_BRANCH
+          git push https://${{ github.actor }}:${{ secrets.WSO2_INTEGRATION_BOT_TOKEN }}@github.com/${{ github.repository }}.git HEAD:refs/heads/${{ steps.get-default-branch.outputs.default_branch }}
